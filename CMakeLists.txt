@@ -86,4 +86,4 @@ if (WIN32)
 endif()
 
 # spdlog 로그 레벨
-# add_compile_definitions(SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
+add_compile_definitions(SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)

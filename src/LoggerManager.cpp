@@ -1,4 +1,7 @@
+#include "j2/LoggerManager.hpp"
 
+#include <spdlog/spdlog.h>
+#include <spdlog/pattern_formatter.h>
 #include <iostream>
 #include <chrono>
 #include <cstdlib>
@@ -6,13 +9,6 @@
 #include <cctype>
 #include <cmath>
 #include <optional>
-#include <sstream>
-#include <iomanip>
-
-#include <spdlog/spdlog.h>
-#include <spdlog/pattern_formatter.h>
-
-#include "j2/LoggerManager.hpp"
 
 namespace j2 {
 
@@ -23,101 +19,109 @@ LoggerManager::~LoggerManager() {
     stopAutoReload();
 }
 
+// init()은 내부에서 락을 잡지만, 오토리로드 스레드 시작/중지는 락 해제 후 호출해 교착을 피한다.
 bool LoggerManager::init(const std::string& defaultConfigPath,
                          const std::string& sectionName,
                          const std::string& loggerName,
                          const std::string& envName) {
-    std::lock_guard<std::mutex> lk(mu_);
+    unsigned interval_to_start = 0;
+    bool need_start = false;
 
-    loggerName_ = loggerName;
-    logSection_ = sectionName;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
 
-    if (!envName.empty()) {
-        if (const char* envPath = std::getenv(envName.c_str())) {
-            iniPath_ = envPath;
-            std::cout << "[LoggerManager] Using config from " << envName << ": " << iniPath_ << "\n";
+        loggerName_ = loggerName;
+        logSection_ = sectionName;
+
+        if (!envName.empty()) {
+            if (const char* envPath = std::getenv(envName.c_str())) {
+                iniPath_ = envPath;
+                std::cout << "[LoggerManager] Using config from " << envName << ": " << iniPath_ << "\n";
+            } else {
+                iniPath_ = defaultConfigPath;
+                std::cout << "[LoggerManager] Env var " << envName << " not set, using default: " << iniPath_ << "\n";
+            }
         } else {
             iniPath_ = defaultConfigPath;
-            std::cout << "[LoggerManager] Env var " << envName << " not set, using default: " << iniPath_ << "\n";
+            std::cout << "[LoggerManager] Using default config path: " << iniPath_ << "\n";
         }
+
+        ini_.SetUnicode();
+        ini_.SetMultiKey(false);
+
+        if (!loadConfig(true)) {
+            std::cerr << "[LoggerManager] Failed to load config.\n";
+            return false;
+        }
+
+        try {
+            lastWriteTime_ = std::filesystem::last_write_time(iniPath_);
+        } catch (...) {
+            lastWriteTime_ = std::filesystem::file_time_type{};
+        }
+
+        auto time_type = utcMode_ ? spdlog::pattern_time_type::utc
+                                  : spdlog::pattern_time_type::local;
+        auto console_fmt = std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type);
+        auto file_fmt    = std::make_unique<spdlog::pattern_formatter>(patternFile_,    time_type);
+
+        distSink_ = std::make_shared<spdlog::sinks::dist_sink_mt>();
+
+        if (enableConsole_) {
+            consoleSink_ = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            consoleSink_->set_level(consoleMin_);
+            consoleSink_->set_formatter(console_fmt->clone());
+            distSink_->add_sink(consoleSink_);
+        }
+
+        if (enableFileAll_) {
+            ensureParentDir(allPath_);
+            allSink_ = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                allPath_, allMaxSize_, allMaxFiles_, false);
+            allSink_->set_level(allFileMin_);
+            allSink_->set_formatter(file_fmt->clone());
+            distSink_->add_sink(allSink_);
+        }
+
+        if (enableFileAlerts_) {
+            ensureParentDir(alertsPath_);
+            alertsSink_ = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                alertsPath_, alertMaxSize_, alertMaxFiles_, false);
+            alertsSink_->set_level(alertsMin_);
+            alertsSink_->set_formatter(file_fmt->clone());
+            distSink_->add_sink(alertsSink_);
+        }
+
+        if (distSink_->sinks().empty()) {
+            consoleSink_ = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+            consoleSink_->set_level(spdlog::level::trace);
+            consoleSink_->set_formatter(
+                std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type));
+            distSink_->add_sink(consoleSink_);
+            std::cerr << "[LoggerManager] No sinks enabled, fallback to console.\n";
+        }
+
+        logger_ = std::make_shared<spdlog::logger>(loggerName_, distSink_);
+        spdlog::register_logger(logger_);
+
+        applySoftSettings();
+
+        if (flushEverySec_ > 0) {
+            spdlog::flush_every(std::chrono::seconds(flushEverySec_));
+        }
+
+        // 초기 1회 디스크 확인
+        checkDiskAndAct();
+
+        // 오토리로드 시작 여부와 주기를 보관해두고, 락 해제 후에 실제 호출한다.
+        need_start = (autoReloadIntervalSec_ > 0);
+        interval_to_start = autoReloadIntervalSec_;
+    } // 여기서 mu_ 잠금 해제
+
+    if (need_start) {
+        startAutoReload(interval_to_start);  // 락 없이 호출 → 내부에서 필요한 범위만 잠금
     } else {
-        iniPath_ = defaultConfigPath;
-        std::cout << "[LoggerManager] Using default config path: " << iniPath_ << "\n";
-    }
-
-    ini_.SetUnicode();
-    ini_.SetMultiKey(false);
-    // ini_.SetCommentChars(";#");  // SimpleIni는 기본적으로 ';'와 '#'를 주석으로 인식하므로 불필요
-
-    if (!loadConfig(true)) {
-        std::cerr << "[LoggerManager] Failed to load config.\n";
-        return false;
-    }
-
-    try {
-        lastWriteTime_ = std::filesystem::last_write_time(iniPath_);
-    } catch (...) {
-        lastWriteTime_ = std::filesystem::file_time_type{};
-    }
-
-    // 전역 UTC 설정 함수는 일부 버전에 존재하지 않습니다. 포맷터의 time_type으로 처리합니다.
-    auto time_type = utcMode_ ? spdlog::pattern_time_type::utc
-                              : spdlog::pattern_time_type::local;
-    auto console_fmt = std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type);
-    auto file_fmt    = std::make_unique<spdlog::pattern_formatter>(patternFile_,    time_type);
-
-    distSink_ = std::make_shared<spdlog::sinks::dist_sink_mt>();
-
-    if (enableConsole_) {
-        consoleSink_ = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        consoleSink_->set_level(consoleMin_);
-        consoleSink_->set_formatter(console_fmt->clone());
-        distSink_->add_sink(consoleSink_);
-    }
-
-    if (enableFileAll_) {
-        ensureParentDir(allPath_);
-        allSink_ = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            allPath_, allMaxSize_, allMaxFiles_, false);
-        allSink_->set_level(allFileMin_);
-        allSink_->set_formatter(file_fmt->clone());
-        distSink_->add_sink(allSink_);
-    }
-
-    if (enableFileAlerts_) {
-        ensureParentDir(alertsPath_);
-        alertsSink_ = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            alertsPath_, alertMaxSize_, alertMaxFiles_, false);
-        alertsSink_->set_level(alertsMin_);
-        alertsSink_->set_formatter(file_fmt->clone());
-        distSink_->add_sink(alertsSink_);
-    }
-
-    if (distSink_->sinks().empty()) {
-        consoleSink_ = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        consoleSink_->set_level(spdlog::level::trace);
-        consoleSink_->set_formatter(
-            std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type));
-        distSink_->add_sink(consoleSink_);
-        std::cerr << "[LoggerManager] No sinks enabled, fallback to console.\n";
-    }
-
-    logger_ = std::make_shared<spdlog::logger>(loggerName_, distSink_);
-    spdlog::register_logger(logger_);
-
-    applySoftSettings();
-
-    if (flushEverySec_ > 0) {
-        spdlog::flush_every(std::chrono::seconds(flushEverySec_));
-    }
-
-    // 초기 1회 디스크 확인
-    checkDiskAndAct();
-
-    if (autoReloadIntervalSec_ > 0) {
-        startAutoReload(autoReloadIntervalSec_);
-    } else {
-        stopAutoReload();
+        stopAutoReload();                    // 락 없이 호출
     }
 
     return true;
@@ -129,7 +133,6 @@ std::shared_ptr<spdlog::logger> LoggerManager::getLogger() const {
 }
 
 void LoggerManager::applySoftSettings() {
-    // 전역 UTC 설정 함수는 사용하지 않고, 포맷터 생성 시 time_type을 지정합니다.
     auto time_type = utcMode_ ? spdlog::pattern_time_type::utc
                               : spdlog::pattern_time_type::local;
 
@@ -368,9 +371,11 @@ bool LoggerManager::loadConfig(bool readAutoReload) {
                                    100ull * 1024ull * 1024ull);
     alertMaxFiles_= static_cast<std::size_t>(ini_.GetLongValue(logSection_.c_str(), "ALERT_MAX_FILES",10));
 
+    // 디스크 감시
     diskRoot_         = ini_.GetValue(logSection_.c_str(), "DISK_ROOT", "");
     diskMinFreeRatio_ = ini_.GetDoubleValue(logSection_.c_str(), "DISK_MIN_FREE_RATIO", 5.0);
 
+    // UDP 알림(Boost.Asio)
     udpIp_            = ini_.GetValue(logSection_.c_str(), "UDP_ALERT_IP", "");
     udpPort_          = static_cast<unsigned>(ini_.GetLongValue(logSection_.c_str(), "UDP_ALERT_PORT", 0));
     udpIntervalSec_   = static_cast<unsigned>(ini_.GetLongValue(logSection_.c_str(), "UDP_ALERT_INTERVAL_SEC", 60));
