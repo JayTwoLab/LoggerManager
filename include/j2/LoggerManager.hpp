@@ -7,14 +7,14 @@
 #include <mutex>
 #include <filesystem>
 #include <chrono>
-#include <optional>
-#include <sstream>
-#include <iomanip>
+
 #include <boost/asio.hpp>
+
 #include <spdlog/logger.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/dist_sink.h>
+
 #include "SimpleIni.h"
 
 // LoggerManager (namespace j2)

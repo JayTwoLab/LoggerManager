@@ -3,7 +3,7 @@
 #ifndef hname
 #define hname "hello_logger"
 #endif
-#include "j2/macro.hpp"
+#include "macro.hpp"
 
 #include <thread>
 #include <chrono>

@@ -1,13 +1,18 @@
-#include "j2/LoggerManager.hpp"
 
-#include <spdlog/spdlog.h>
-#include <spdlog/pattern_formatter.h>
 #include <iostream>
 #include <chrono>
 #include <cstdlib>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <optional>
+#include <sstream>
+#include <iomanip>
+
+#include <spdlog/spdlog.h>
+#include <spdlog/pattern_formatter.h>
+
+#include "j2/LoggerManager.hpp"
 
 namespace j2 {
 
@@ -42,7 +47,7 @@ bool LoggerManager::init(const std::string& defaultConfigPath,
 
     ini_.SetUnicode();
     ini_.SetMultiKey(false);
-    ini_.SetCommentChars(";#");
+    // ini_.SetCommentChars(";#");  // SimpleIni는 기본적으로 ';'와 '#'를 주석으로 인식하므로 불필요
 
     if (!loadConfig(true)) {
         std::cerr << "[LoggerManager] Failed to load config.\n";
@@ -55,8 +60,7 @@ bool LoggerManager::init(const std::string& defaultConfigPath,
         lastWriteTime_ = std::filesystem::file_time_type{};
     }
 
-    spdlog::set_utc_mode(utcMode_);
-
+    // 전역 UTC 설정 함수는 일부 버전에 존재하지 않습니다. 포맷터의 time_type으로 처리합니다.
     auto time_type = utcMode_ ? spdlog::pattern_time_type::utc
                               : spdlog::pattern_time_type::local;
     auto console_fmt = std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type);
@@ -125,10 +129,9 @@ std::shared_ptr<spdlog::logger> LoggerManager::getLogger() const {
 }
 
 void LoggerManager::applySoftSettings() {
+    // 전역 UTC 설정 함수는 사용하지 않고, 포맷터 생성 시 time_type을 지정합니다.
     auto time_type = utcMode_ ? spdlog::pattern_time_type::utc
                               : spdlog::pattern_time_type::local;
-
-    spdlog::set_utc_mode(utcMode_);
 
     auto console_fmt = std::make_unique<spdlog::pattern_formatter>(patternConsole_, time_type);
     auto file_fmt    = std::make_unique<spdlog::pattern_formatter>(patternFile_,    time_type);
@@ -353,28 +356,26 @@ bool LoggerManager::loadConfig(bool readAutoReload) {
     patternConsole_ = ini_.GetValue(logSection_.c_str(), "PATTERN_CONSOLE",
                                     "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v");
     patternFile_    = ini_.GetValue(logSection_.c_str(), "PATTERN_FILE",
-                                    "[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] %v");
+                                 "[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] %v");
 
     allPath_    = ini_.GetValue(logSection_.c_str(), "ALL_PATH",    "logs/all.log");
     alertsPath_ = ini_.GetValue(logSection_.c_str(), "ALERTS_PATH", "logs/alerts.log");
 
     allMaxSize_   = parseSizeBytes(ini_.GetValue(logSection_.c_str(), "ALL_MAX_SIZE",   "104857600"),
-                                   100ull * 1024ull * 1024ull);
+                                 100ull * 1024ull * 1024ull);
     allMaxFiles_  = static_cast<std::size_t>(ini_.GetLongValue(logSection_.c_str(), "ALL_MAX_FILES",  5));
     alertMaxSize_ = parseSizeBytes(ini_.GetValue(logSection_.c_str(), "ALERT_MAX_SIZE", "104857600"),
                                    100ull * 1024ull * 1024ull);
     alertMaxFiles_= static_cast<std::size_t>(ini_.GetLongValue(logSection_.c_str(), "ALERT_MAX_FILES",10));
 
-    // 디스크 감시
     diskRoot_         = ini_.GetValue(logSection_.c_str(), "DISK_ROOT", "");
     diskMinFreeRatio_ = ini_.GetDoubleValue(logSection_.c_str(), "DISK_MIN_FREE_RATIO", 5.0);
 
-    // UDP 알림(Boost.Asio)
     udpIp_            = ini_.GetValue(logSection_.c_str(), "UDP_ALERT_IP", "");
     udpPort_          = static_cast<unsigned>(ini_.GetLongValue(logSection_.c_str(), "UDP_ALERT_PORT", 0));
     udpIntervalSec_   = static_cast<unsigned>(ini_.GetLongValue(logSection_.c_str(), "UDP_ALERT_INTERVAL_SEC", 60));
     udpMessageTmpl_   = ini_.GetValue(logSection_.c_str(), "UDP_ALERT_MESSAGE",
-                                      "DISK LOW: path={path} free={avail_bytes}B ({ratio}%)");
+                                    "DISK LOW: path={path} free={avail_bytes}B ({ratio}%)");
 
     if (readAutoReload) {
         autoReloadIntervalSec_ = static_cast<unsigned>(
@@ -540,4 +541,3 @@ bool LoggerManager::sendUdpAlert(const std::string& msg) {
 }
 
 } // namespace j2
-
