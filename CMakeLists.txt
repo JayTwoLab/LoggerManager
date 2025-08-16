@@ -58,12 +58,14 @@ add_executable(${PROJECT_NAME}
 )
 
 # *.INI 파일을 IDE에서 편집 가능
-add_custom_target(config_files
-    SOURCES ${CMAKE_SOURCE_DIR}/j2_logger_manager_config.ini
+add_custom_target(config_files SOURCES
+    ${CMAKE_SOURCE_DIR}/j2_logger_manager_config_english.ini
+    ${CMAKE_SOURCE_DIR}/j2_logger_manager_config_korean.ini
 )
-source_group("Config" FILES
-  ${CMAKE_SOURCE_DIR}/j2_logger_manager_config.ini
-)
+#source_group("Config" FILES
+#  ${CMAKE_SOURCE_DIR}/j2_logger_manager_config_english.ini
+#  ${CMAKE_SOURCE_DIR}/j2_logger_manager_config_korean.ini
+#)
 
 # 헤더 파일 인클루드 경로
 target_include_directories(${PROJECT_NAME} PRIVATE

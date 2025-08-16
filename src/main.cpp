@@ -12,7 +12,7 @@ int main() {
     // 기본 설정 파일명을 j2_logger_manager_config.ini 로 변경
 
     // std::string defaultConfig = "j2_logger_manager_config.ini";
-    std::string defaultConfig = "C:\\workspace\\dev\\github\\LoggerManager\\j2_logger_manager_config.ini";
+    std::string defaultConfig = "C:\\workspace\\dev\\github\\LoggerManager\\j2_logger_manager_config_korean.ini";
     // std::string defaultConfig = "C:\\not_exist.ini";
 
     std::string sectionName   = "Log";
