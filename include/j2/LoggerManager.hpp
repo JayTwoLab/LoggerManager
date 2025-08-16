@@ -7,14 +7,13 @@
 #include <mutex>
 #include <filesystem>
 #include <chrono>
-
+#include <sstream>
+#include <iomanip>
 #include <boost/asio.hpp>
-
 #include <spdlog/logger.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/dist_sink.h>
-
 #include "SimpleIni.h"
 
 // LoggerManager (namespace j2)
@@ -22,7 +21,7 @@
 // - soft-reload: 레벨/패턴/UTC/flush_on/주기적 플러시 즉시 반영
 // - hard-reload: on/off, 파일 경로, 회전 정책 변경 시 해당 싱크 재생성
 // - AUTO_RELOAD_SEC: init-only
-// - 디스크 감시: DISK_ROOT 기준 잔여 비율이 임계값 미만이면 파일 로깅 중지 + UDP 알림 전송(Boost.Asio)
+// - 디스크 감시: DISK_GUARD_ENABLE로 ON/OFF, 임계치 미만 시 파일 로깅 중지 + UDP 알림
 
 namespace j2 {
 
@@ -99,8 +98,9 @@ private:
     std::size_t alertMaxFiles_ = 10;
 
     // 디스크 감시(단일)
+    bool        diskGuardEnable_ = true;   // INI로 ON/OFF
     std::string diskRoot_;
-    double      diskMinFreeRatio_ = 5.0; // %
+    double      diskMinFreeRatio_ = 5.0;   // %
 
     // UDP 알림(Boost.Asio)
     std::string udpIp_;
@@ -128,4 +128,3 @@ private:
 };
 
 } // namespace j2
-

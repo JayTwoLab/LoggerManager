@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <optional>
 
 namespace j2 {
 
@@ -19,7 +18,7 @@ LoggerManager::~LoggerManager() {
     stopAutoReload();
 }
 
-// init()은 내부에서 락을 잡지만, 오토리로드 스레드 시작/중지는 락 해제 후 호출해 교착을 피한다.
+// init()은 내부에서 락을 잡지만, 오토리로드 시작/중지는 락 해제 후 호출해 교착을 피한다.
 bool LoggerManager::init(const std::string& defaultConfigPath,
                          const std::string& sectionName,
                          const std::string& loggerName,
@@ -119,9 +118,9 @@ bool LoggerManager::init(const std::string& defaultConfigPath,
     } // 여기서 mu_ 잠금 해제
 
     if (need_start) {
-        startAutoReload(interval_to_start);  // 락 없이 호출 → 내부에서 필요한 범위만 잠금
+        startAutoReload(interval_to_start);
     } else {
-        stopAutoReload();                    // 락 없이 호출
+        stopAutoReload();
     }
 
     return true;
@@ -305,6 +304,103 @@ bool LoggerManager::reloadIfChanged() {
     return true;
 }
 
+// 디스크 감시: INI로 ON/OFF 가능
+void LoggerManager::checkDiskAndAct() {
+    // 감시가 꺼져 있으면, 혹시 이전에 분리했던 파일 싱크를 복구하고 종료
+    if (!diskGuardEnable_) {
+        if (fileSinksDetachedForDisk_) {
+            if (enableFileAll_    && allSink_)    distSink_->add_sink(allSink_);
+            if (enableFileAlerts_ && alertsSink_) distSink_->add_sink(alertsSink_);
+            applySoftSettings();
+            fileSinksDetachedForDisk_ = false;
+            if (logger_) logger_->info("Disk guard disabled by config. File logging resumed.");
+        }
+        return;
+    }
+
+    if (diskRoot_.empty()) return;
+
+    std::filesystem::space_info info{};
+    try {
+        info = std::filesystem::space(std::filesystem::path(diskRoot_));
+    } catch (...) {
+        if (logger_) logger_->warn("DISK_ROOT='{}' space() failed. Skip this round.", diskRoot_);
+        return;
+    }
+
+    unsigned long long avail = static_cast<unsigned long long>(info.available);
+    unsigned long long cap   = static_cast<unsigned long long>(info.capacity);
+    long double ratio = cap > 0 ? (static_cast<long double>(avail) * 100.0L / static_cast<long double>(cap)) : 100.0L;
+
+    bool low = (ratio < static_cast<long double>(diskMinFreeRatio_));
+
+    if (low) {
+        if (!fileSinksDetachedForDisk_) {
+            if (allSink_)    { allSink_->flush();    distSink_->remove_sink(allSink_); }
+            if (alertsSink_) { alertsSink_->flush(); distSink_->remove_sink(alertsSink_); }
+            fileSinksDetachedForDisk_ = true;
+            if (logger_) logger_->warn("Low disk space on '{}': {:.2f}% free. File logging suspended, console only.", diskRoot_, static_cast<double>(ratio));
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        bool due = (lastUdpSent_.time_since_epoch().count() == 0) ||
+                   (now - lastUdpSent_ >= std::chrono::seconds(udpIntervalSec_));
+        if (due && !udpIp_.empty() && udpPort_ > 0) {
+            std::string payload = buildUdpMessage(udpMessageTmpl_, diskRoot_, avail, ratio);
+            if (sendUdpAlert(payload)) {
+                lastUdpSent_ = now;
+            }
+        }
+    } else {
+        if (fileSinksDetachedForDisk_) {
+            if (enableFileAll_    && allSink_)    distSink_->add_sink(allSink_);
+            if (enableFileAlerts_ && alertsSink_) distSink_->add_sink(alertsSink_);
+            applySoftSettings();
+            fileSinksDetachedForDisk_ = false;
+            if (logger_) logger_->info("Disk space recovered on '{}': {:.2f}% free. File logging resumed.", diskRoot_, static_cast<double>(ratio));
+        }
+    }
+}
+
+std::string LoggerManager::buildUdpMessage(const std::string& tmpl,
+                                           const std::string& path,
+                                           unsigned long long availBytes,
+                                           long double ratioPercent) const {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss << std::setprecision(2) << static_cast<double>(ratioPercent);
+    std::string ratio2 = oss.str();
+
+    std::string msg = tmpl;
+    replaceAll(msg, "{path}", path);
+    replaceAll(msg, "{avail_bytes}", std::to_string(static_cast<long long>(availBytes)));
+    replaceAll(msg, "{ratio}", ratio2);
+    return msg;
+}
+
+void LoggerManager::replaceAll(std::string& s, const std::string& from, const std::string& to) {
+    if (from.empty()) return;
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::string::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
+bool LoggerManager::sendUdpAlert(const std::string& msg) {
+    try {
+        boost::asio::io_context io;
+        boost::asio::ip::udp::endpoint ep(boost::asio::ip::make_address(udpIp_), static_cast<unsigned short>(udpPort_));
+        boost::asio::ip::udp::socket sock(io);
+        sock.open(boost::asio::ip::udp::v4());
+        sock.send_to(boost::asio::buffer(msg), ep);
+        sock.close();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool LoggerManager::startAutoReload(unsigned interval_sec) {
     std::lock_guard<std::mutex> lk(mu_);
     if (autoReloadRunning_) {
@@ -371,7 +467,8 @@ bool LoggerManager::loadConfig(bool readAutoReload) {
                                    100ull * 1024ull * 1024ull);
     alertMaxFiles_= static_cast<std::size_t>(ini_.GetLongValue(logSection_.c_str(), "ALERT_MAX_FILES",10));
 
-    // 디스크 감시
+    // 디스크 감시 ON/OFF 및 파라미터
+    diskGuardEnable_ = toBool(ini_.GetValue(logSection_.c_str(), "DISK_GUARD_ENABLE", "true"), true);
     diskRoot_         = ini_.GetValue(logSection_.c_str(), "DISK_ROOT", "");
     diskMinFreeRatio_ = ini_.GetDoubleValue(logSection_.c_str(), "DISK_MIN_FREE_RATIO", 5.0);
 
@@ -451,98 +548,6 @@ spdlog::level::level_enum LoggerManager::parseLevel(
     if (v == "critical" || v == "crit")return spdlog::level::critical;
     if (v == "off")                    return spdlog::level::off;
     return def;
-}
-
-void LoggerManager::checkDiskAndAct() {
-    if (diskRoot_.empty()) return;
-
-    auto safe_space = [&](const std::string& root)->std::optional<std::filesystem::space_info>{
-        try {
-            std::filesystem::path p(root);
-            std::filesystem::path dir = p;
-            return std::filesystem::space(dir);
-        } catch (...) {
-            return std::nullopt;
-        }
-    };
-
-    auto sp = safe_space(diskRoot_);
-    if (!sp) {
-        if (logger_) logger_->warn("DISK_ROOT='{}' space() failed. Skip this round.", diskRoot_);
-        return;
-    }
-
-    unsigned long long avail = static_cast<unsigned long long>(sp->available);
-    unsigned long long cap   = static_cast<unsigned long long>(sp->capacity);
-    long double ratio = cap > 0 ? (static_cast<long double>(avail) * 100.0L / static_cast<long double>(cap)) : 100.0L;
-
-    bool low = (ratio < static_cast<long double>(diskMinFreeRatio_));
-
-    if (low) {
-        if (!fileSinksDetachedForDisk_) {
-            if (allSink_)    { allSink_->flush();    distSink_->remove_sink(allSink_); }
-            if (alertsSink_) { alertsSink_->flush(); distSink_->remove_sink(alertsSink_); }
-            fileSinksDetachedForDisk_ = true;
-            if (logger_) logger_->warn("Low disk space on '{}': {:.2f}% free. File logging suspended, console only.", diskRoot_, static_cast<double>(ratio));
-        }
-
-        auto now = std::chrono::steady_clock::now();
-        bool due = (lastUdpSent_.time_since_epoch().count() == 0) ||
-                   (now - lastUdpSent_ >= std::chrono::seconds(udpIntervalSec_));
-        if (due && !udpIp_.empty() && udpPort_ > 0) {
-            std::string payload = buildUdpMessage(udpMessageTmpl_, diskRoot_, avail, ratio);
-            if (sendUdpAlert(payload)) {
-                lastUdpSent_ = now;
-            }
-        }
-    } else {
-        if (fileSinksDetachedForDisk_) {
-            if (enableFileAll_    && allSink_)    distSink_->add_sink(allSink_);
-            if (enableFileAlerts_ && alertsSink_) distSink_->add_sink(alertsSink_);
-            applySoftSettings();
-            fileSinksDetachedForDisk_ = false;
-            if (logger_) logger_->info("Disk space recovered on '{}': {:.2f}% free. File logging resumed.", diskRoot_, static_cast<double>(ratio));
-        }
-    }
-}
-
-std::string LoggerManager::buildUdpMessage(const std::string& tmpl,
-                                           const std::string& path,
-                                           unsigned long long availBytes,
-                                           long double ratioPercent) const {
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed);
-    oss << std::setprecision(2) << static_cast<double>(ratioPercent);
-    std::string ratio2 = oss.str();
-
-    std::string msg = tmpl;
-    replaceAll(msg, "{path}", path);
-    replaceAll(msg, "{avail_bytes}", std::to_string(static_cast<long long>(availBytes)));
-    replaceAll(msg, "{ratio}", ratio2);
-    return msg;
-}
-
-void LoggerManager::replaceAll(std::string& s, const std::string& from, const std::string& to) {
-    if (from.empty()) return;
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-}
-
-bool LoggerManager::sendUdpAlert(const std::string& msg) {
-    try {
-        boost::asio::io_context io;
-        boost::asio::ip::udp::endpoint ep(boost::asio::ip::make_address(udpIp_), static_cast<unsigned short>(udpPort_));
-        boost::asio::ip::udp::socket sock(io);
-        sock.open(boost::asio::ip::udp::v4());
-        sock.send_to(boost::asio::buffer(msg), ep);
-        sock.close();
-        return true;
-    } catch (...) {
-        return false;
-    }
 }
 
 } // namespace j2
