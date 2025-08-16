@@ -2,11 +2,20 @@
 
 [English](README.md)
 
+<br />
+
 ---
 
 ## 개요
 
-**LoggerManager**는 **spdlog** 기반의 경량 C++ 로깅 래퍼입니다. INI 파일 하나(`j2_logger_manager_config.ini`)로 설정하고, 실행 중에도 즉시 반영되는 **soft-reload**와 sink 재생성이 필요한 **hard-reload**를 지원합니다. 또한 디스크 잔여 용량에 따라 파일 로깅을 자동 중단/복귀하고, 중단 중에는 **Boost.Asio UDP 알림**을 보냅니다. 기본 로거 이름(`hello_logger`)용 **초단축 매크로**도 제공합니다.
+- **LoggerManager**는 **spdlog** 기반의 경량 `C++` 로깅 래퍼입니다.
+- `INI` 파일 하나(`j2_logger_manager_config.ini`)로 설정하고,
+- 실행 중에도 즉시 반영되는 **soft-reload**와 sink 재생성이 필요한 **hard-reload**를 지원합니다.
+- 또한 디스크 잔여 용량에 따라 파일 로깅을 자동 중단/복귀하고,
+- 중단 중에는 **Boost.Asio UDP 알림**을 보냅니다.
+- 기본 로거 이름(`hello_logger`)용 **초단축 매크로**도 제공합니다.
+
+<br />
 
 ---
 
@@ -21,6 +30,8 @@
 - **디스크 감시**: 특정 디스크의 잔여 비율이 임계값 미만이면 파일 싱크 분리 → 콘솔만 출력
 - **UDP 알림(Boost.Asio)**: 파일 로깅 중단 동안 일정 간격으로 알림 전송
 - **짧은 매크로**: `ht/hd/hi/hw/he/hc`
+
+<br />
 
 ---
 
@@ -92,6 +103,19 @@ add_compile_definitions(SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
 `j2_logger_manager_config.ini` (발췌 — 주석에 상세 설명 포함):
 
 ```ini
+; =======================
+; j2 / spdlog 설정 파일
+; =======================
+; 리로드 구분 안내
+; - [soft-reload] : 재시작 없이 즉시 반영(레벨/패턴/시간/flush_on/주기적 플러시/디스크 감시 ON/OFF 등)
+; - [hard-reload] : sink 재생성 필요(on/off, 경로, 회전 용량/백업 개수)
+; - [init-only]   : 최초 초기화에서만 읽음(AUTO_RELOAD_SEC)
+;
+; 하드 리로드 주의
+; - 파일 경로 변경 시 새 파일로 즉시 전환(기존 파일 보존), 권한/네트워크 경로 주의
+; - 회전 용량/백업 개수 축소는 즉시 파일을 줄이지 않으며 다음 회전부터 적용
+; - 매우 큰 용량(GB~TB)은 64비트 권장, 파일시스템 한계·ulimit에 유의
+
 [Log]
 
 ; ===== [init-only] 최초 1회만 읽음 =====
@@ -101,41 +125,58 @@ AUTO_RELOAD_SEC=60
 ENABLE_CONSOLE_LOG=true
 ENABLE_FILE_LOG_ALL=true
 ENABLE_FILE_LOG_ALERTS=true
+
 ALL_PATH=logs/all.log
 ALERTS_PATH=logs/alerts.log
+
+; 회전 정책
+; 예시> 일반 로그 최대 500MB = 100MB * 5개
 ALL_MAX_SIZE=100MB
 ALL_MAX_FILES=5
+; 예시> 경고 로그 최대 약 1GB = 100MB * 10개
 ALERT_MAX_SIZE=100MB
 ALERT_MAX_FILES=10
 
 ; ===== [soft-reload] 즉시 반영 =====
-TIME_MODE=local                 ; local | utc
+TIME_MODE=local
 
-; 최소 레벨(이상):
+; 최소 레벨(이상)
 ;   trace, debug, info, warn, error, critical, off
+
 CONSOLE_LEVEL=trace
+; CONSOLE_LEVEL=critical
+
 ALL_FILE_LEVEL=trace
 ALERTS_FILE_LEVEL=warn
 LOGGER_LEVEL=trace
 FLUSH_ON_LEVEL=warn
 
-FLUSH_EVERY_SEC=1               ; 주기적 플러시
+; 주기적 플러시(초)
+FLUSH_EVERY_SEC=1
 
-; 패턴(자리표시자):
-;   %Y %m %d %H %M %S %e = 시간, %l=레벨, %t=스레드 ID, %v=메시지, %^ %$=색상 on/off
+; 패턴
+;   %Y %m %d %H %M %S %e = 시간
+;   %l=레벨  %t=스레드ID  %v=메시지  %^/%$=컬러 on/off
 PATTERN_CONSOLE=[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%t] %v
 PATTERN_FILE=[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] %v
 
-; 디스크 감시(단일 디스크 루트) — soft-reload
-DISK_ROOT=/hello
+; ===== 디스크 감시(단일, soft-reload) =====
+; 디스크 감시 ON/OFF
+DISK_GUARD_ENABLE=false
+; 감시할 디스크(또는 마운트/드라이브) 상의 경로. 예) /hello 또는 C:\hello
+; DISK_ROOT=/hello
+DISK_ROOT=C:\
+; 잔여 비율(%)이 임계값 미만이면 파일 로깅 중지(콘솔만 출력)
 DISK_MIN_FREE_RATIO=5
-
-; UDP 알림(Boost.Asio). 플레이스홀더: {path}, {avail_bytes}, {ratio}
+; 파일 로깅 중지 동안 UDP 알림 전송
 UDP_ALERT_IP=127.0.0.1
 UDP_ALERT_PORT=10514
 UDP_ALERT_INTERVAL_SEC=60
+; 플레이스홀더: {path}={DISK_ROOT}, {avail_bytes}=가용 바이트, {ratio}=잔여 비율(%)
 UDP_ALERT_MESSAGE=DISK LOW: path={path} free={avail_bytes}B ({ratio}%)
 ```
+
+<br />
 
 ---
 
