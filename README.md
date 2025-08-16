@@ -215,6 +215,6 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 ## License
 
-- Project code: see `LICENSE` (insert your license here).  
+- Project code: see `LICENSE` (`MIT License`).  
 - `SimpleIni.h`: see upstream license.  
 - `ConvertUTF.c/h`: Unicode, Inc. reference implementation — see included license.
