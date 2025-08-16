@@ -197,6 +197,6 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 
 ## 라이선스
 
-- 프로젝트 코드: `LICENSE` 참조(귀하의 라이선스 추가)  
+- 프로젝트 코드: `LICENSE` 참조(`MIT License`)  
 - `SimpleIni.h`: 상위 프로젝트 라이선스 참조  
 - `ConvertUTF.c/h`: Unicode, Inc. 레퍼런스 구현 — 포함된 라이선스 참조
